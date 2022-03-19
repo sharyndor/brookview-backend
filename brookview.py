@@ -215,24 +215,24 @@ class SocketHandler:
                 backlogs = { sock : backlog for sock, backlog in backlogs.items() if sock.should_continue}
                 for sock in self.sockets:
                     while not sock.messages.empty():
-                        request = json.loads(sock.messages.get())
-                        for group in request.values():
-                            for item in group.items():
-                                if sock not in backlogs:
-                                    backlogs[sock] = Queue()
-                                backlogs[sock].put(item)
+                        requests = json.loads(sock.messages.get())
+                        for request in requests:
+                            if sock not in backlogs:
+                                backlogs[sock] = Queue()
+                            backlogs[sock].put(request)
             
             for sock, backlog in backlogs.items():
                 if not backlog.empty():
-                    item = backlog.get()
-                    name, typeVal = item
-                    hist_lookup = '='.join(typeVal)
+                    request = backlog.get()
+                    channelType = request['streams'][0]['type']
+                    channel     = request['streams'][0]['value']
+                    hist_lookup = channelType + '=' + channel
                     response = ''
                     lastUpdateTime = 0
                     if hist_lookup in self.history:
                         lastUpdateTime, response = self.history[hist_lookup]
                     if not response or (time() - lastUpdateTime) > 300:
-                        if response := self.process(item):
+                        if response := self.process(request):
                             didUpdate = True
                             self.history[hist_lookup] = time(), response
                             sock.send_message(WebSocket.Opcode.TEXT, response.encode())
@@ -265,11 +265,12 @@ class SocketHandler:
             self.process_yt_channel(argument)
 
 
-    def process(self, item) -> str:
-        name, (channelType, channel) = item
+    def process(self, request) -> str:
+        name = request['name']
+        channelType = request['streams'][0]['type']
+        channel     = request['streams'][0]['value']
 
         response = ''
-
         # Get the channel data
         if channelType == 'yt-channel':
             conn = HTTPSConnection('www.youtube.com')
@@ -289,7 +290,13 @@ class SocketHandler:
             #     f.write(json.dumps(jdata, indent=4).encode())
 
             # Search for videos
-            videos = find_key_like(jdata, 'videoRenderer') + find_key_like(jdata, 'gridVideoRenderer')
+            videos = find_key_like(jdata, 'videoRenderer')
+
+            shelves = find_key_like(jdata, 'shelfRenderer')
+            for shelf in shelves:
+                shelfText = json_search(shelf, str, 'title', 'runs', 0, 'text')
+                if shelfText == 'Upcoming live streams':
+                    videos += find_key_like(shelf, 'gridVideoRenderer')
 
             message = { 
                 'name' : name,
