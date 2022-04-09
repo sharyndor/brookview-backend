@@ -1,6 +1,5 @@
 #!/usr/bin/python
 
-from pyexpat.errors import messages
 from queue import Queue
 import select
 import socket
@@ -12,13 +11,12 @@ from hashlib import sha1
 from http.client import HTTPSConnection
 import json
 
-import os
 from os import path
 
 from time import sleep, time
 
 PORT = 80
-VERSION = [0, 2, 1] # vMajor.Minor.Patch
+VERSION = [0, 2, 2] # vMajor.Minor.Patch
 
 class WebSocket:
   HANDSHAKE  = (
@@ -219,20 +217,22 @@ class SocketHandler:
         # For each socket, convert each received message to JSON and put it in the backlog
         for sock in self.sockets:
           while not sock.messages.empty():
-            requests = json.loads(sock.messages.get())
+            message = json.loads(sock.messages.get())
 
-            if 'autoUpdate' in requests and requests['autoUpdate'] == True:
+            if 'autoUpdate' in message and message['autoUpdate'] == True:
               self.autoUpdate()
 
-            requestedVersion = requests['version'] if 'version' in requests else [0, 0, 0]
+            requestedVersion = message['version'] if 'version' in message else [0, 0, 0]
 
             # Client is rather out of date, ignore the data but keep the connection
             if requestedVersion[0] != VERSION[0] or requestedVersion == [0, 0, 0]:
               requests = []
-
+              print(requestedVersion, VERSION, 'clearing requests')
               # Respond with the version so that the client knows that it's out of date
               message = { 'version' : VERSION }
               sock.send_message(WebSocket.Opcode.TEXT, json.dumps(message).encode())
+            else:
+              requests = message['requests'] if 'requests' in message else []
 
             # Add any requests that aren't already known
             for request in requests:
@@ -289,7 +289,6 @@ class SocketHandler:
           self.sockets.append(websock)
     except:
       print('Accept socket died, I hope this is an auto-update...')
-      pass
 
   def processYT_Channel(self, channel):
     # Fetch the data from youtube
@@ -414,11 +413,11 @@ class SocketHandler:
       sock.sock.close()
     
     # Allow time for sockets/threads to close
-    sleep(2)
-
-    # Run the new file
+    sleep(1)
     print('Goodbye: v' + '.'.join([str(n) for n in VERSION]))
-    exec(open(__file__).read())
+    sleep(1)
+
+    # Kill the process and allow the start script to reboots the server
     exit(0)
 
 if __name__ == '__main__':
