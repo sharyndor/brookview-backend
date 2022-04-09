@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 from pyexpat.errors import messages
 from queue import Queue
 import select
@@ -10,317 +12,417 @@ from hashlib import sha1
 from http.client import HTTPSConnection
 import json
 
+import os
 from os import path
 
 from time import sleep, time
 
 PORT = 80
+VERSION = [0, 1, 0] # v0.1.0
 
 class WebSocket:
-    HANDSHAKE  = (
-        b"HTTP/1.1 101 Switching Protocols\r\n"
-        b"Upgrade: websocket\r\n"
-        b"Connection: Upgrade\r\n"
-        b"Sec-WebSocket-Accept: "
-    )
+  HANDSHAKE  = (
+    b"HTTP/1.1 101 Switching Protocols\r\n"
+    b"Upgrade: websocket\r\n"
+    b"Connection: Upgrade\r\n"
+    b"Sec-WebSocket-Accept: "
+  )
 
-    class Opcode:
-        CONTINUATION = 0x0
-        TEXT         = 0x1
-        BINARY       = 0x2
-        CLOSE        = 0x8
-        PING         = 0x9
-        PONG         = 0xA
+  class Opcode:
+    CONTINUATION = 0x0
+    TEXT         = 0x1
+    BINARY       = 0x2
+    CLOSE        = 0x8
+    PING         = 0x9
+    PONG         = 0xA
 
-    def __init__(self, sock : socket.socket):
-        self.sock = sock
-        self.buffer = bytes()
-        self.should_continue = True
-        self.messages = Queue()
-        self.thread = Thread(target=self.run)
-        self.squeue = Queue()
-        self.rsock, self.ssock = socket.socketpair()
+  def __init__(self, sock : socket.socket):
+    self.sock = sock
+    self.buffer = bytes()
+    self.should_continue = True
+    self.messages = Queue()
+    self.thread = Thread(target=self.run)
+    self.squeue = Queue()
+    self.rsock, self.ssock = socket.socketpair()
+    self.backlog = []
 
-    def start(self):
-        self.thread.start()
+  def start(self):
+    self.thread.start()
 
-    def read_more(self):
-        socks = [self.sock, self.rsock]
-        rsocks, _, xsocks = select.select(socks, [], socks)
+  def read_more(self):
+    socks = [self.sock, self.rsock]
+    rsocks, _, xsocks = select.select(socks, [], socks)
 
-        if self.sock in rsocks:
-            self.buffer += self.sock.recv(1024)
+    if self.sock in rsocks:
+      self.buffer += self.sock.recv(1024)
 
-        if self.rsock in rsocks:
-            _ = self.rsock.recv(1)
-            while not self.squeue.empty():
-                self.sock.sendall(self.squeue.get())
+    if self.rsock in rsocks:
+      _ = self.rsock.recv(1)
+      while not self.squeue.empty():
+        self.sock.sendall(self.squeue.get())
 
-    def read_some(self, n):
-        while len(self.buffer) < n:
-            self.read_more()
+  def read_some(self, n):
+    while len(self.buffer) < n:
+      self.read_more()
 
-        result, self.buffer = self.buffer[:n], self.buffer[n:]
-        return result
+    result, self.buffer = self.buffer[:n], self.buffer[n:]
+    return result
     
-    def read_until(self, ending):
-        while ending not in self.buffer:
-            self.read_more()
+  def read_until(self, ending):
+    while ending not in self.buffer:
+      self.read_more()
 
-        n = self.buffer.find(ending) + len(ending)
-        result, self.buffer = self.buffer[:n], self.buffer[n:]
-        return result
-
-    def run(self):
-        try:
-            self.send_handshake(self.read_until(bytes(b'\r\n\r\n')))
-            while self.should_continue:
-                opcode, message = self.read_message()
-                self.handle_message(opcode, message)
-        except Exception as e:
-            self.should_continue = False
-            self.sock.close()
-            print(e)
-
-        print('dying')
-
-    def send_handshake(self, request):
-        nonce = request.split(b'Sec-WebSocket-Key: ')[1].split(b'\r\n')[0]
-        static = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-        key = b64encode(sha1(nonce + static).digest())
-        response = WebSocket.HANDSHAKE + key + b'\r\n\r\n'
-        self.squeue.put(response)
-        self.ssock.sendall(b'\1')
-        return None
-
-    def read_message(self):
-        header = self.read_some(2)
-
-        # Opcode / Flags - 1 Byte
-        opcode = (header[0] >> 0) & 0b1111
-        #fin    = (header[0] >> 7) & 0b1
-        #rsv1   = (header[0] >> 6) & 0b1
-        #rsv2   = (header[0] >> 5) & 0b1
-        #rsv3   = (header[0] >> 4) & 0b1
-
-        # Mask / Length - 1 Byte
-        length = (header[1] >> 0) & 0b1111111
-        mask   = (header[1] >> 7) & 0b1
-
-        # Extended Length - 2 Bytes
-        if length == 126:
-            header += self.read_some(2)
-            length = int.from_bytes(header[2:4], 'big')
-        # Extended Length - 8 bytes
-        elif length == 127:
-            header += self.read_some(8)
-            length = int.from_bytes(header[2:10], 'big')
-
-        # Mask - 4 Bytes
-        mask_bytes = self.read_some(4) if mask else b'\0\0\0\0'
-
-        # Payload - ? Bytes
-        payload = bytes([b ^ mask_bytes[i % 4] for i, b in enumerate(self.read_some(length))])
-        return opcode, payload
-
-    def send_message(self, opcode, payload):
-        header = bytes()
-
-        # Opcode / Flags
-        header += bytes([0x80 + opcode])
-
-        # Mask / Length
-        plen = len(payload)
-        if plen < 126:
-            header += bytes([plen])
-        elif plen < 2**16:
-            header += bytes([126])
-            header += plen.to_bytes(2, 'big')
-        elif plen < 2**64:
-            header += bytes([127])
-            header += plen.to_bytes(8, 'big')
-        else:
-            raise Exception
-
-        # Mask Omitted
-
-        # Payload
-        self.squeue.put(header + payload)
-        self.ssock.sendall(b'\1')
-
-    def handle_message(self, opcode, payload):
-        if opcode == WebSocket.Opcode.TEXT:
-            message = payload.decode()
-            self.messages.put(message)
-        elif opcode == WebSocket.Opcode.PING:
-            self.send_message(WebSocket.Opcode.PONG, payload)
-        elif opcode == WebSocket.Opcode.CLOSE:
-            self.send_message(WebSocket.Opcode.CLOSE, payload[0:2])
-            self.sock.close()
-            self.should_continue = False
-
-def find_key_like(o, s):
-    result = []
-    if type(o) is dict:
-        for k, v in o.items():
-            if s in k:
-                result.append(v)
-            else:
-                result += find_key_like(v, s)
-    elif type(o) is list:
-        for n in o:
-            result += find_key_like(n, s)
+    n = self.buffer.find(ending) + len(ending)
+    result, self.buffer = self.buffer[:n], self.buffer[n:]
     return result
 
-def json_search(d, t, *kargs):
-    if len(kargs) == 0:
-        return d if type(d) is t else t()
+  def run(self):
+    try:
+      self.send_handshake(self.read_until(bytes(b'\r\n\r\n')))
+      while self.should_continue:
+        opcode, message = self.read_message()
+        self.handle_message(opcode, message)
+    except Exception as e:
+      self.should_continue = False
+      self.sock.close()
+      print(e)
+
+    print('A socket has been closed. Disconnected?')
+
+  def send_handshake(self, request):
+    nonce = request.split(b'Sec-WebSocket-Key: ')[1].split(b'\r\n')[0]
+    static = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+    key = b64encode(sha1(nonce + static).digest())
+    response = WebSocket.HANDSHAKE + key + b'\r\n\r\n'
+    self.squeue.put(response)
+    self.ssock.sendall(b'\1')
+    return None
+
+  def read_message(self):
+    header = self.read_some(2)
+
+    # Opcode / Flags - 1 Byte
+    opcode = (header[0] >> 0) & 0b1111
+    #fin    = (header[0] >> 7) & 0b1
+    #rsv1   = (header[0] >> 6) & 0b1
+    #rsv2   = (header[0] >> 5) & 0b1
+    #rsv3   = (header[0] >> 4) & 0b1
+
+    # Mask / Length - 1 Byte
+    length = (header[1] >> 0) & 0b1111111
+    mask   = (header[1] >> 7) & 0b1
+
+    # Extended Length - 2 Bytes
+    if length == 126:
+      header += self.read_some(2)
+      length = int.from_bytes(header[2:4], 'big')
+    # Extended Length - 8 bytes
+    elif length == 127:
+      header += self.read_some(8)
+      length = int.from_bytes(header[2:10], 'big')
+
+    # Mask - 4 Bytes
+    mask_bytes = self.read_some(4) if mask else b'\0\0\0\0'
+
+    # Payload - ? Bytes
+    payload = bytes([b ^ mask_bytes[i % 4] for i, b in enumerate(self.read_some(length))])
+    return opcode, payload
+
+  def send_message(self, opcode, payload):
+    header = bytes()
+
+    # Opcode / Flags
+    header += bytes([0x80 + opcode])
+
+    # Mask / Length
+    plen = len(payload)
+    if plen < 126:
+      header += bytes([plen])
+    elif plen < 2**16:
+      header += bytes([126])
+      header += plen.to_bytes(2, 'big')
+    elif plen < 2**64:
+      header += bytes([127])
+      header += plen.to_bytes(8, 'big')
     else:
-        arg = kargs[0]
-        if type(arg) is str and type(d) is dict and arg in d:
-            return json_search(d[arg], t, *kargs[1:])
-        elif type(arg) is int and type(d) is list and arg < len(d):
-            return json_search(d[arg], t, *kargs[1:])
-        elif callable(arg) and type(d) is list:
-            return arg([json_search(n, t, *kargs[1:]) for n in d])
-        else:
-            return t()
+      raise Exception
+
+    # Mask Omitted
+
+    # Payload
+    self.squeue.put(header + payload)
+    self.ssock.sendall(b'\1')
+
+  def handle_message(self, opcode, payload):
+    if opcode == WebSocket.Opcode.TEXT:
+      message = payload.decode()
+      self.messages.put(message)
+    elif opcode == WebSocket.Opcode.PING:
+      self.send_message(WebSocket.Opcode.PONG, payload)
+    elif opcode == WebSocket.Opcode.CLOSE:
+      self.send_message(WebSocket.Opcode.CLOSE, payload[0:2])
+      self.sock.close()
+      self.should_continue = False
+
+def find_key_like(o, s):
+  result = []
+  if type(o) is dict:
+    for k, v in o.items():
+      if s in k:
+        result.append(v)
+      else:
+        result += find_key_like(v, s)
+  elif type(o) is list:
+    for n in o:
+      result += find_key_like(n, s)
+  return result
+
+def json_search(d, t, *kargs):
+  if len(kargs) == 0:
+    return d if type(d) is t else t()
+  else:
+    arg = kargs[0]
+    if type(arg) is str and type(d) is dict and arg in d:
+      return json_search(d[arg], t, *kargs[1:])
+    elif type(arg) is int and type(d) is list and arg < len(d):
+      return json_search(d[arg], t, *kargs[1:])
+    elif callable(arg) and type(d) is list:
+      return arg([json_search(n, t, *kargs[1:]) for n in d])
+    else:
+      return t()
 
 class SocketHandler:
-    sockets : list[WebSocket]
+  sockets : list[WebSocket] = []
 
-    def __init__(self, port):
-        self.sockets = []
-        self.lock = Lock()
+  def __init__(self, port):
+    self.sockets = []
+    self.lock = Lock()
 
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(('', port))
+    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    self.sock.bind(('', port))
 
-        self.history = {}
-        if path.exists('history.json'):
-            with open('history.json', 'rb') as f:
-                if data := f.read():
-                    self.history = json.loads(data.decode())
+    self.history = {}
+    if path.exists('history.json'):
+      with open('history.json', 'rb') as f:
+        if data := f.read():
+          self.history = json.loads(data.decode())
 
-    def start(self):
-        Thread(target=self.accept_all).start()
+  def start(self):
+    Thread(target=self.accept_all).start()
 
-        backlogs : dict[WebSocket, Queue[str]] = {}
+    # Run forever
+    while True:
+      with self.lock:
+        # Get rid of any sockets which have stopped
+        self.sockets = [sock for sock in self.sockets if sock.should_continue]
 
-        while True:
-            didWork = False
-            didUpdate = False
-            with self.lock:
-                self.sockets = [sock for sock in self.sockets if sock.should_continue]
-                backlogs = { sock : backlog for sock, backlog in backlogs.items() if sock.should_continue}
-                for sock in self.sockets:
-                    while not sock.messages.empty():
-                        requests = json.loads(sock.messages.get())
-                        for request in requests:
-                            if sock not in backlogs:
-                                backlogs[sock] = Queue()
-                            backlogs[sock].put(request)
-            
-            for sock, backlog in backlogs.items():
-                if not backlog.empty():
-                    request = backlog.get()
-                    channelType = request['streams'][0]['type']
-                    channel     = request['streams'][0]['value']
-                    hist_lookup = channelType + '=' + channel
-                    response = ''
-                    lastUpdateTime = 0
-                    if hist_lookup in self.history:
-                        lastUpdateTime, response = self.history[hist_lookup]
-                    if not response or (time() - lastUpdateTime) > 300:
-                        if response := self.process(request):
-                            didUpdate = True
-                            self.history[hist_lookup] = time(), response
-                            sock.send_message(WebSocket.Opcode.TEXT, response.encode())
-                            sleep(1)
-                    else:
-                        sock.send_message(WebSocket.Opcode.TEXT, response.encode())
+        # For each socket, convert each received message to JSON and put it in the backlog
+        for sock in self.sockets:
+          while not sock.messages.empty():
+            requests = json.loads(sock.messages.get())
 
-                    didWork = True
-                    break
+            if 'autoUpdate' in requests and requests['autoUpdate'] == True:
+              self.autoUpdate()
 
-            if didUpdate:
-                with open('history.json', 'wb') as f:
-                    f.write(json.dumps(self.history).encode())
+            requestedVersion = requests['version'] if 'version' in requests else [0, 0, 0]
 
-            if not didWork:
-                sleep(1)
+            # Client is rather out of date, ignore the data but keep the connection
+            if requestedVersion[0] != VERSION[0] or requestedVersion == [0, 0, 0]:
+              requests = []
 
-    def accept_all(self):
-        self.sock.listen(5)
-        while True:
-            sock, _ = self.sock.accept()
-            websock = WebSocket(sock)
-            websock.start()
-            with self.lock:
-                self.sockets.append(websock)
+              # Respond with the version so that the client knows that it's out of date
+              message = { 'version' : VERSION }
+              sock.send_message(WebSocket.Opcode.TEXT, json.dumps(message).encode())
 
-    def respond_to_message(self, message):
-        command, argument = message.split('=')
-        if command == 'yt-channel':
-            self.process_yt_channel(argument)
+            # Add any requests that aren't already known
+            for request in requests:
+              foundRequest = False
+              for item in sock.backlog:
+                if item['name'] == request['name']:
+                  foundRequest = True
+                  break
+              if not foundRequest:
+                sock.backlog.append(request)
+      
+      # Check whether the first item of each socket's backlog needs work
+      for sock in self.sockets:
+        if len(sock.backlog) > 0:
+          request = sock.backlog[0]
+          sock.backlog = sock.backlog[1:]
+          
+          hist_lookup = request['name']
 
+          lastUpdateTime, message = 0, str()
+          if hist_lookup in self.history:
+            lastUpdateTime, message = self.history[hist_lookup]
 
-    def process(self, request) -> str:
-        name = request['name']
-        channelType = request['streams'][0]['type']
-        channel     = request['streams'][0]['value']
+          # Consider data to be out of date if version differs or processed outside of the last 5 minutes
+          goodVersion = 'version' in message and message['version'] == VERSION
+          if not message or not goodVersion or (time() - lastUpdateTime) > (5 * 60):
+            message = self.process(request)
+            if message := self.process(request):
+              self.history[hist_lookup] = time(), message
+              with open('history.json', 'wb') as f:
+                f.write(json.dumps(self.history).encode())
+                
+              # A web query was made, sleep to throttle queries
+              sleep(1)
+          
+          sock.send_message(WebSocket.Opcode.TEXT, json.dumps(message).encode())
 
-        response = ''
-        # Get the channel data
-        if channelType == 'yt-channel':
-            conn = HTTPSConnection('www.youtube.com')
-            conn.request('GET', '/channel/' + channel)
-            response = conn.getresponse()
-            data = response.read()
+      # If no work is remaining, pause the thread to keep it from spinning
+      remainingWork = 0
+      for sock in self.sockets:
+        remainingWork += len(sock.backlog)
+      
+      if remainingWork == 0:
+        sleep(1)
 
-            # Find the data
-            start = 'var ytInitialData = '.encode()
-            end = ';</script>'.encode()
-            data = data[data.find(start) + len(start):]
-            data = data[:data.find(end)]
+  def accept_all(self):
+    try:
+      self.sock.listen(5)
+      while True:
+        sock, _ = self.sock.accept()
+        websock = WebSocket(sock)
+        websock.start()
+        with self.lock:
+          self.sockets.append(websock)
+    except:
+      print('Accept socket died, I hope this is an auto-update...')
+      pass
 
-            # Convert to JSON
-            jdata = json.loads(data)
-            # with open('out.json', 'wb') as f:
-            #     f.write(json.dumps(jdata, indent=4).encode())
+  def processYT_Channel(self, channel):
+    # Fetch the data from youtube
+    conn = HTTPSConnection('www.youtube.com')
+    conn.request('GET', '/channel/' + channel)
+    response = conn.getresponse()
+    data = response.read()
 
-            # Search for videos
-            videos = find_key_like(jdata, 'videoRenderer')
+    # Find where the page info is located
+    start = 'var ytInitialData = '.encode()
+    end = ';</script>'.encode()
+    data = data[data.find(start) + len(start):]
+    data = data[:data.find(end)]
 
-            shelves = find_key_like(jdata, 'shelfRenderer')
-            for shelf in shelves:
-                shelfText = json_search(shelf, str, 'title', 'runs', 0, 'text')
-                if shelfText == 'Upcoming live streams':
-                    videos += find_key_like(shelf, 'gridVideoRenderer')
+    # Convert to JSON
+    jdata = json.loads(data)
 
-            message = { 
-                'name' : name,
-                'id' : channel,
-                'videos' : [],
-            }
+    # Collect the videos
+    videos = []
 
-            for video in videos:
-                id = json_search(video, str, 'videoId')
-                title = json_search(video, str, 'title', 'simpleText') or json_search(video, str, 'title', 'runs', 0, 'text')
-                startTime = json_search(video, str, 'upcomingEventData', 'startTime')
-                viewText = json_search(video, str, 'viewCountText', 'runs', ''.join, 'text') or json_search(video, str, 'viewCountText', 'simpleText')
+    # If the channel is live, the data will be in a videoRenderer
+    for video in find_key_like(jdata, 'videoRenderer'):
+      # Channels may have multiple live streams, filter out promoted videos to find them
+      viewText = json_search(video, str, 'viewCountText', 'runs', ''.join, 'text') or json_search(video, str, 'viewCountText', 'simpleText')
+      if 'watching' in viewText or 'waiting' in viewText:
+        videos.append({
+          'dataType' : 'yt-video',
+          'dataValue' : json_search(video, str, 'videoId'),
+          'title' : json_search(video, str, 'title', 'simpleText') or json_search(video, str, 'title', 'runs', 0, 'text'),
+          'status' : 'live' if 'watching' in viewText else 'upcoming',
+          'startTime' : 0 if 'watching' in viewText else json_search(video, str, 'upcomingEventData', 'startTime'),
+        })
+    
+    # If the channel is not live, the data will be in a shelfRenderer
+    shelves = find_key_like(jdata, 'shelfRenderer')
+    for shelf in shelves:
+      # Search for the shelf with the right title
+      if json_search(shelf, str, 'title', 'runs', 0, 'text') == 'Upcoming live streams':
+        # Channels may have multiple upcoming streams, add each
+        for video in find_key_like(shelf, 'gridVideoRenderer'):
+          viewText = json_search(video, str, 'viewCountText', 'runs', ''.join, 'text') or json_search(video, str, 'viewCountText', 'simpleText')
+          videos.append({
+            'dataType' : 'yt-video',
+            'dataValue' : json_search(video, str, 'videoId'),
+            'title' : json_search(video, str, 'title', 'simpleText') or json_search(video, str, 'title', 'runs', 0, 'text'),
+            'status' : 'live' if 'watching' in viewText else 'upcoming',
+            'startTime' : 0 if 'watching' in viewText else json_search(video, str, 'upcomingEventData', 'startTime'),
+          })
+    
+    return videos
 
-                ids = [v['id'] for v in message['videos']]
-                if id not in ids and ('watching' in viewText or 'waiting' in viewText):
-                    message['videos'].append({
-                        'id' : id,
-                        'startTime' : startTime,
-                        'viewText' : viewText,
-                        'title' : title,
-                    })
-            response = json.dumps(message)
-        return response
+  def processTTV_Channel(self, channel):
+    # Fetch the data from Twitch
+    conn = HTTPSConnection('www.twitch.tv')
+    conn.request('GET', channel)
+    response = conn.getresponse()
+    data = response.read()
+
+    # Stream data is contained in this tag
+    start = '<script type="application/ld+json">'.encode()
+    end = '</script>'.encode()
+
+    # If the channel isn't live, this will be missing
+    if start not in data:
+      return []
+
+    # Trim off everything before the tag
+    data = data[data.find(start) + len(start):]
+
+    # Look for the closing tag (it should always be present)
+    if end not in data:
+      return []
+
+    # Trim off everything after the tag
+    data = data[:data.find(end)]
+
+    # Convert to JSON
+    # Twitch uses a list for some reason, so take the first element
+    jdata = json.loads(data)[0]
+
+    return [{
+      'dataType' : 'ttv-channel',
+      'dataValue' : channel,
+      'title' : jdata['description'],
+      'startTime' : 0,
+      'status' : 'live',
+    }]
+
+  def process(self, request) -> str:
+    message = { 
+      'name' : request['name'],
+      'videos' : [],
+    }
+
+    for stream in request['streams']:
+      dataType = stream['type']
+      dataValue = stream['value']
+
+      if dataType == 'yt-channel':
+        message['videos'] += self.processYT_Channel(dataValue)
+      elif dataType == 'ttv-channel':
+        message['videos'] += self.processTTV_Channel(dataValue)
+
+    message['version'] = VERSION
+    return message
+
+  def autoUpdate(self):
+    # Download the new file
+    try:
+      conn = HTTPSConnection('raw.githubusercontent.com')
+      conn.request('GET', '/sharyndor/brookview-backend/main/brookview.py')
+      response = conn.getresponse()
+      print(__file__)
+      # with open(__file__, 'wb') as f:
+      #   f.write(response.read())
+    except:
+      print('Something failed while trying to download the update!')
+      return
+
+    # Close everything down
+    self.sock.close()
+    for sock in self.sockets:
+      sock.sock.close()
+    
+    # Allow time for sockets/threads to close
+    sleep(2)
+
+    # Run the new file
+    print('Goodbye: v' + '.'.join([str(n) for n in VERSION]))
+    exec(open('brookview.py').read())
+    exit(0)
 
 if __name__ == '__main__':
-    handler = SocketHandler(PORT)
-    handler.start()
+  print('Hello: v' + '.'.join([str(n) for n in VERSION]))
+  handler = SocketHandler(PORT)
+  handler.start()
