@@ -18,7 +18,7 @@ from os import path
 from time import sleep, time
 
 PORT = 80
-VERSION = [0, 2, 0] # vMajor.Minor.Patch
+VERSION = [0, 2, 1] # vMajor.Minor.Patch
 
 class WebSocket:
   HANDSHAKE  = (
