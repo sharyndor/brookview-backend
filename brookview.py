@@ -18,7 +18,7 @@ from os import path
 from time import sleep, time
 
 PORT = 80
-VERSION = [0, 1, 0] # v0.1.0
+VERSION = [0, 2, 0] # vMajor.Minor.Patch
 
 class WebSocket:
   HANDSHAKE  = (
@@ -402,9 +402,8 @@ class SocketHandler:
       conn = HTTPSConnection('raw.githubusercontent.com')
       conn.request('GET', '/sharyndor/brookview-backend/main/brookview.py')
       response = conn.getresponse()
-      print(__file__)
-      # with open(__file__, 'wb') as f:
-      #   f.write(response.read())
+      with open(__file__, 'wb') as f:
+        f.write(response.read())
     except:
       print('Something failed while trying to download the update!')
       return
@@ -419,7 +418,7 @@ class SocketHandler:
 
     # Run the new file
     print('Goodbye: v' + '.'.join([str(n) for n in VERSION]))
-    exec(open('brookview.py').read())
+    exec(open(__file__).read())
     exit(0)
 
 if __name__ == '__main__':
