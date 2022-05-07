@@ -222,27 +222,29 @@ class SocketHandler:
             if 'autoUpdate' in message and message['autoUpdate'] == True:
               self.autoUpdate()
 
-            requestedVersion = message['version'] if 'version' in message else [0, 0, 0]
+            if 'messageType' in message:
+              if message['messageType'] == 'version':
+                sock.send_message(WebSocket.Opcode.TEXT, json.dumps({
+                  'messageType': 'version',
+                  'version' : VERSION,
+                }).encode())
+              elif message['messageType'] == 'streamers':
+                requests = []
+                if 'version' in message and message['version'] == VERSION:
+                  requests = message['requests'] if 'requests' in message else []
+                else:
+                  print('Bad version')
 
-            # Client is rather out of date, ignore the data but keep the connection
-            if requestedVersion[0] != VERSION[0] or requestedVersion == [0, 0, 0]:
-              requests = []
-              print(requestedVersion, VERSION, 'clearing requests')
-              # Respond with the version so that the client knows that it's out of date
-              message = { 'version' : VERSION }
-              sock.send_message(WebSocket.Opcode.TEXT, json.dumps(message).encode())
-            else:
-              requests = message['requests'] if 'requests' in message else []
+                # Add any requests that aren't already known
+                for request in requests.values():
+                  foundRequest = False
+                  for item in sock.backlog:
+                    if item['name'] == request['name']:
+                      foundRequest = True
+                      break
+                  if not foundRequest:
+                    sock.backlog.append(request)
 
-            # Add any requests that aren't already known
-            for request in requests:
-              foundRequest = False
-              for item in sock.backlog:
-                if item['name'] == request['name']:
-                  foundRequest = True
-                  break
-              if not foundRequest:
-                sock.backlog.append(request)
       
       # Check whether the first item of each socket's backlog needs work
       for sock in self.sockets:
@@ -393,6 +395,7 @@ class SocketHandler:
         message['videos'] += self.processTTV_Channel(dataValue)
 
     message['version'] = VERSION
+    message['messageType'] = 'update'
     return message
 
   def autoUpdate(self):
