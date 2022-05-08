@@ -15,7 +15,7 @@ from os import path
 
 from time import sleep, time
 
-PORT = 80
+PORT = 8080
 VERSION = [0, 3, 2] # vMajor.Minor.Patch
 
 class WebSocket:
@@ -197,6 +197,7 @@ class SocketHandler:
     self.lock = Lock()
 
     self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     self.sock.bind(('', port))
 
     self.history = {}
@@ -294,10 +295,17 @@ class SocketHandler:
 
   def processYT_Channel(self, channel):
     # Fetch the data from youtube
-    conn = HTTPSConnection('www.youtube.com')
-    conn.request('GET', '/channel/' + channel)
-    response = conn.getresponse()
-    data = response.read()
+    keepTrying = True
+    while keepTrying:
+      try:
+        conn = HTTPSConnection('www.youtube.com')
+        conn.request('GET', '/channel/' + channel)
+        response = conn.getresponse()
+        data = response.read()
+        keepTrying = False
+      except:
+        sleep(1)
+        pass
 
     # Find where the page info is located
     start = 'var ytInitialData = '.encode()
@@ -317,8 +325,8 @@ class SocketHandler:
       viewText = json_search(video, str, 'viewCountText', 'runs', ''.join, 'text') or json_search(video, str, 'viewCountText', 'simpleText')
       if 'watching' in viewText or 'waiting' in viewText:
         videos.append({
-          'dataType' : 'yt-video',
-          'dataValue' : json_search(video, str, 'videoId'),
+          'type' : 'yt-video',
+          'value' : json_search(video, str, 'videoId'),
           'title' : json_search(video, str, 'title', 'simpleText') or json_search(video, str, 'title', 'runs', 0, 'text'),
           'status' : 'live' if 'watching' in viewText else 'upcoming',
           'startTime' : 0 if 'watching' in viewText else json_search(video, str, 'upcomingEventData', 'startTime'),
@@ -333,8 +341,8 @@ class SocketHandler:
         for video in find_key_like(shelf, 'gridVideoRenderer'):
           viewText = json_search(video, str, 'viewCountText', 'runs', ''.join, 'text') or json_search(video, str, 'viewCountText', 'simpleText')
           videos.append({
-            'dataType' : 'yt-video',
-            'dataValue' : json_search(video, str, 'videoId'),
+            'type' : 'yt-video',
+            'value' : json_search(video, str, 'videoId'),
             'title' : json_search(video, str, 'title', 'simpleText') or json_search(video, str, 'title', 'runs', 0, 'text'),
             'status' : 'live' if 'watching' in viewText else 'upcoming',
             'startTime' : 0 if 'watching' in viewText else json_search(video, str, 'upcomingEventData', 'startTime'),
@@ -344,10 +352,17 @@ class SocketHandler:
 
   def processTTV_Channel(self, channel):
     # Fetch the data from Twitch
-    conn = HTTPSConnection('www.twitch.tv')
-    conn.request('GET', channel)
-    response = conn.getresponse()
-    data = response.read()
+    keepTrying = True
+    while keepTrying:
+      try:
+        conn = HTTPSConnection('www.twitch.tv')
+        conn.request('GET', channel)
+        response = conn.getresponse()
+        data = response.read()
+        keepTrying = False
+      except:
+        sleep(1)
+        pass
 
     # Stream data is contained in this tag
     start = '<script type="application/ld+json">'.encode()
@@ -372,8 +387,8 @@ class SocketHandler:
     jdata = json.loads(data)[0]
 
     return [{
-      'dataType' : 'ttv-channel',
-      'dataValue' : channel,
+      'type' : 'ttv-channel',
+      'value' : channel,
       'title' : jdata['description'],
       'startTime' : 0,
       'status' : 'live',
@@ -383,7 +398,12 @@ class SocketHandler:
     message = { 
       'name' : request['name'],
       'videos' : [],
+      'version' : VERSION,
+      'messageType' : 'update'
     }
+
+    if 'streams' not in request:
+      return message
 
     for stream in request['streams']:
       dataType = stream['type']
@@ -394,8 +414,6 @@ class SocketHandler:
       elif dataType == 'ttv-channel':
         message['videos'] += self.processTTV_Channel(dataValue)
 
-    message['version'] = VERSION
-    message['messageType'] = 'update'
     return message
 
   def autoUpdate(self):
