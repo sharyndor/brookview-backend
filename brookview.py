@@ -266,7 +266,12 @@ class SocketHandler:
         # For each socket, convert each received message to JSON and put it in the backlog
         for sock in self.sockets:
           while not sock.messages.empty():
-            message = json.loads(sock.messages.get())
+            try:
+              data = sock.messages.get()
+              message = json.loads(data)
+            except:
+              print('Weird data in: ' + data)
+              continue
 
             if message['messageType'] == 'init':
               self.process_init_message(sock, message)
