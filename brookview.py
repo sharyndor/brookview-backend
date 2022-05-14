@@ -317,7 +317,10 @@ class SocketHandler:
     data = data[:data.find(end)]
 
     # Convert to JSON
-    jdata = json.loads(data)
+    try:
+      jdata = json.loads(data)
+    except:
+      return []
 
     # Collect the videos
     videos = []
@@ -387,7 +390,10 @@ class SocketHandler:
 
     # Convert to JSON
     # Twitch uses a list for some reason, so take the first element
-    jdata = json.loads(data)[0]
+    try:
+      jdata = json.loads(data)[0]
+    except:
+      return []
 
     return [{
       'type' : 'ttv-channel',
