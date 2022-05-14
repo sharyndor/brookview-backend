@@ -16,7 +16,47 @@ from os import path, _exit
 from time import sleep, time
 
 PORT = 8080
-VERSION = [0, 3, 2] # vMajor.Minor.Patch
+VERSION = [0, 4, 0] # vMajor.Minor.Patch
+
+  
+def read_json_file_to_object(fileName):
+  if path.exists(fileName):
+    with open(fileName, 'rb') as f:
+      if data := f.read():
+        return json.loads(data.decode())
+  return None
+
+def write_object_to_json_file(obj, fileName):
+  with open(fileName, 'wb') as f:
+    f.write(json.dumps(obj, indent=4).encode())
+  
+
+def find_key_like(o, s):
+  result = []
+  if type(o) is dict:
+    for k, v in o.items():
+      if s in k:
+        result.append(v)
+      else:
+        result += find_key_like(v, s)
+  elif type(o) is list:
+    for n in o:
+      result += find_key_like(n, s)
+  return result
+
+def json_search(d, t, *kargs):
+  if len(kargs) == 0:
+    return d if type(d) is t else t()
+  else:
+    arg = kargs[0]
+    if type(arg) is str and type(d) is dict and arg in d:
+      return json_search(d[arg], t, *kargs[1:])
+    elif type(arg) is int and type(d) is list and arg < len(d):
+      return json_search(d[arg], t, *kargs[1:])
+    elif callable(arg) and type(d) is list:
+      return arg([json_search(n, t, *kargs[1:]) for n in d])
+    else:
+      return t()
 
 class WebSocket:
   HANDSHAKE  = (
@@ -39,7 +79,7 @@ class WebSocket:
     self.buffer = bytes()
     self.should_continue = True
     self.messages = Queue()
-    self.thread = Thread(target=self.run)
+    self.thread = Thread(target=self.run, name='WebSocket')
     self.squeue = Queue()
     self.rsock, self.ssock = socket.socketpair()
     self.backlog = []
@@ -162,33 +202,6 @@ class WebSocket:
       self.sock.close()
       self.should_continue = False
 
-def find_key_like(o, s):
-  result = []
-  if type(o) is dict:
-    for k, v in o.items():
-      if s in k:
-        result.append(v)
-      else:
-        result += find_key_like(v, s)
-  elif type(o) is list:
-    for n in o:
-      result += find_key_like(n, s)
-  return result
-
-def json_search(d, t, *kargs):
-  if len(kargs) == 0:
-    return d if type(d) is t else t()
-  else:
-    arg = kargs[0]
-    if type(arg) is str and type(d) is dict and arg in d:
-      return json_search(d[arg], t, *kargs[1:])
-    elif type(arg) is int and type(d) is list and arg < len(d):
-      return json_search(d[arg], t, *kargs[1:])
-    elif callable(arg) and type(d) is list:
-      return arg([json_search(n, t, *kargs[1:]) for n in d])
-    else:
-      return t()
-
 class SocketHandler:
   sockets : list[WebSocket] = []
 
@@ -200,14 +213,49 @@ class SocketHandler:
     self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     self.sock.bind(('', port))
 
-    self.history = {}
-    if path.exists('history.json'):
-      with open('history.json', 'rb') as f:
-        if data := f.read():
-          self.history = json.loads(data.decode())
+    self.history = read_json_file_to_object('history.json') or {}    
+    self.initData = read_json_file_to_object('initData.json') or []
+
+  def check_version(self, message):
+    if 'version' in message and message['version'] == VERSION:
+      return True
+    else:
+      print('Bad version')
+      return False
+
+  def add_init_data(self, newData):
+    found = False
+    for data in self.initData:
+      if data['name'] == newData['name']:
+        found = True
+        break
+
+    if not found:
+      self.initData.append(newData)
+
+  def process_init_message(self, sock : WebSocket, message):
+    for data in message['initData']:
+      self.add_init_data(data)
+    write_object_to_json_file(self.initData, 'initData.json')
+
+    sock.send_message(WebSocket.Opcode.TEXT, json.dumps({
+      'messageType': 'init',
+      'version' : VERSION,
+      'initData': self.initData,
+    }).encode())
+
+    # Add requests for everything out there
+    for request in self.initData:
+      sock.backlog.append(request)
+
+  def process_init_update(self, sock : WebSocket, message):
+    self.add_init_data(message['streamer'])
+    write_object_to_json_file(self.initData, 'initData.json')
+
+    sock.backlog.append(message['streamer'])
 
   def start(self):
-    Thread(target=self.accept_all).start()
+    Thread(target=self.accept_all, name='Accept').start()
 
     # Run forever
     while True:
@@ -220,35 +268,14 @@ class SocketHandler:
           while not sock.messages.empty():
             message = json.loads(sock.messages.get())
 
-            if 'restart' in message and message['restart'] == True:
+            if message['messageType'] == 'init':
+              self.process_init_message(sock, message)
+            elif message['messageType'] == 'initUpdate':
+              self.process_init_update(sock, message)
+            elif message['messageType'] == 'restart' and message['restart'] == True:
               self.restart()
-
-            if 'autoUpdate' in message and message['autoUpdate'] == True:
-              self.autoUpdate()
-
-            if 'messageType' in message:
-              if message['messageType'] == 'version':
-                sock.send_message(WebSocket.Opcode.TEXT, json.dumps({
-                  'messageType': 'version',
-                  'version' : VERSION,
-                }).encode())
-              elif message['messageType'] == 'streamers':
-                requests = []
-                if 'version' in message and message['version'] == VERSION:
-                  requests = message['requests'] if 'requests' in message else []
-                else:
-                  print('Bad version')
-
-                # Add any requests that aren't already known
-                for request in requests.values():
-                  foundRequest = False
-                  for item in sock.backlog:
-                    if item['name'] == request['name']:
-                      foundRequest = True
-                      break
-                  if not foundRequest:
-                    sock.backlog.append(request)
-
+            elif message['messageType'] == 'autoUpdate' and message['autoUpdate'] == True:
+              self.auto_update()
       
       # Check whether the first item of each socket's backlog needs work
       for sock in self.sockets:
@@ -268,8 +295,7 @@ class SocketHandler:
             message = self.process(request)
             if message := self.process(request):
               self.history[hist_lookup] = time(), message
-              with open('history.json', 'wb') as f:
-                f.write(json.dumps(self.history).encode())
+              write_object_to_json_file(self.history, 'history.json')
                 
               # A web query was made, sleep to throttle queries
               sleep(1)
@@ -296,7 +322,7 @@ class SocketHandler:
     except:
       print('Accept socket died, I hope this is an auto-update...')
 
-  def processYT_Channel(self, channel):
+  def process_yt_Channel(self, channel):
     # Fetch the data from youtube
     keepTrying = True
     while keepTrying:
@@ -356,7 +382,7 @@ class SocketHandler:
     
     return videos
 
-  def processTTV_Channel(self, channel):
+  def process_ttv_channel(self, channel):
     # Fetch the data from Twitch
     keepTrying = True
     while keepTrying:
@@ -419,9 +445,9 @@ class SocketHandler:
       dataValue = stream['value']
 
       if dataType == 'yt-channel':
-        message['videos'] += self.processYT_Channel(dataValue)
+        message['videos'] += self.process_yt_Channel(dataValue)
       elif dataType == 'ttv-channel':
-        message['videos'] += self.processTTV_Channel(dataValue)
+        message['videos'] += self.process_ttv_channel(dataValue)
 
     return message
 
@@ -439,7 +465,7 @@ class SocketHandler:
     # Kill the process and allow the start script to reboots the server
     _exit(0)
 
-  def autoUpdate(self):
+  def auto_update(self):
     # Download the new file
     try:
       conn = HTTPSConnection('raw.githubusercontent.com')
