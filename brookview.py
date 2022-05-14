@@ -11,7 +11,7 @@ from hashlib import sha1
 from http.client import HTTPSConnection
 import json
 
-from os import path
+from os import path, _exit
 
 from time import sleep, time
 
@@ -220,6 +220,9 @@ class SocketHandler:
           while not sock.messages.empty():
             message = json.loads(sock.messages.get())
 
+            if 'restart' in message and message['restart'] == True:
+              self.restart()
+
             if 'autoUpdate' in message and message['autoUpdate'] == True:
               self.autoUpdate()
 
@@ -416,6 +419,20 @@ class SocketHandler:
 
     return message
 
+  def restart(self):
+    # Close everything down
+    self.sock.close()
+    for sock in self.sockets:
+      sock.sock.close()
+    
+    # Allow time for sockets/threads to close
+    sleep(1)
+    print('Goodbye: v' + '.'.join([str(n) for n in VERSION]))
+    sleep(1)
+
+    # Kill the process and allow the start script to reboots the server
+    _exit(0)
+
   def autoUpdate(self):
     # Download the new file
     try:
@@ -428,18 +445,7 @@ class SocketHandler:
       print('Something failed while trying to download the update!')
       return
 
-    # Close everything down
-    self.sock.close()
-    for sock in self.sockets:
-      sock.sock.close()
-    
-    # Allow time for sockets/threads to close
-    sleep(1)
-    print('Goodbye: v' + '.'.join([str(n) for n in VERSION]))
-    sleep(1)
-
-    # Kill the process and allow the start script to reboots the server
-    exit(0)
+    self.restart()
 
 if __name__ == '__main__':
   print('Hello: v' + '.'.join([str(n) for n in VERSION]))
